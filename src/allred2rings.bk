@@ -1,0 +1,94 @@
+#include <Arduino.h>
+#include <soc/gpio_reg.h>
+
+#define LED_PIN     21
+#define ONBOARD_LED 8
+#define NUM_LEDS    48
+
+// Adjust brightness (0–255) and hold interval (in milliseconds)
+uint8_t  brightness = 60;
+uint32_t intervalMs = 5000;  // 5000 ms = 5 seconds per step
+
+// 800 kHz WS2812B timing at 160 MHz (1 cycle = 6.25 ns)
+#define T0H_CYCLES  56   // ~350 ns HIGH for '0'
+#define T0L_CYCLES  144  // ~900 ns LOW  for '0'
+#define T1H_CYCLES  120  // ~750 ns HIGH for '1'
+#define T1L_CYCLES  80   // ~500 ns LOW  for '1'
+
+struct RGB {
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
+};
+
+const RGB colors[] = {
+  {  0,   0,   0},  // Off (starts every cycle dark)
+  {  0, 255,   0},  // Green
+  {  0,   0, 255},  // Blue
+  {  0, 180, 255},  // Cyan
+  {255, 160,   0},  // Yellow
+  {255,  65,   0},  // Amber / Orange
+  {160,   0, 255},  // Purple / Violet
+  {255,   0, 110},  // Magenta / Pink
+  {255, 180,  90},  // Warm White
+  {255, 255, 255},  // Cool White
+  {255,   0,   0}   // Red
+};
+
+const int NUM_COLORS = sizeof(colors) / sizeof(colors[0]);
+
+portMUX_TYPE timingMux = portMUX_INITIALIZER_UNLOCKED;
+
+static inline void waitCycles(uint32_t start, uint32_t cycles) {
+  while ((esp_cpu_get_ccount() - start) < cycles) {}
+}
+
+void IRAM_ATTR sendByte(uint8_t b) {
+  for (int bit = 7; bit >= 0; bit--) {
+    uint32_t start = esp_cpu_get_ccount();
+    REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_PIN));  // HIGH
+    if (b & (1 << bit)) {
+      waitCycles(start, T1H_CYCLES);
+      REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_PIN));  // LOW
+      waitCycles(start, T1H_CYCLES + T1L_CYCLES);
+    } else {
+      waitCycles(start, T0H_CYCLES);
+      REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_PIN));  // LOW
+      waitCycles(start, T0H_CYCLES + T0L_CYCLES);
+    }
+  }
+}
+
+void IRAM_ATTR setColor(uint8_t r, uint8_t g, uint8_t b, uint8_t level) {
+  uint8_t scaledG = (g * level) / 255;
+  uint8_t scaledR = (r * level) / 255;
+  uint8_t scaledB = (b * level) / 255;
+
+  portENTER_CRITICAL(&timingMux);
+  for (int i = 0; i < NUM_LEDS; i++) {
+    sendByte(scaledG);  // WS2812B expects Green first
+    sendByte(scaledR);  // Red second
+    sendByte(scaledB);  // Blue third
+  }
+  portEXIT_CRITICAL(&timingMux);
+  delayMicroseconds(300);  // Latch frame
+}
+
+void setup() {
+  pinMode(ONBOARD_LED, OUTPUT);
+  digitalWrite(ONBOARD_LED, LOW);
+
+  pinMode(LED_PIN, OUTPUT);         // Reclaim GPIO 21 from UART0 TX
+  digitalWrite(LED_PIN, LOW);
+  delayMicroseconds(300);           // Mandatory LOW reset before first frame
+
+  setColor(0, 0, 0, 0);             // Immediately turn off all LEDs on boot
+}
+
+void loop() {
+  for (int i = 0; i < NUM_COLORS; i++) {
+    digitalWrite(ONBOARD_LED, i % 2);  // Toggle onboard blue LED each step
+    setColor(colors[i].r, colors[i].g, colors[i].b, brightness);
+    delay(intervalMs);
+  }
+}

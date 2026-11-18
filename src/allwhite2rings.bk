@@ -1,0 +1,64 @@
+#include <Arduino.h>
+#include <soc/gpio_reg.h>
+
+#define LED_PIN     21
+#define ONBOARD_LED 8
+#define NUM_LEDS    48
+
+// Adjust brightness here: 0 (off) to 255 (max)
+uint8_t brightness = 10;
+
+// 800 kHz WS2812B timing at 160 MHz (1 cycle = 6.25 ns)
+#define T0H_CYCLES  56   // ~350 ns HIGH for '0'
+#define T0L_CYCLES  144  // ~900 ns LOW  for '0'
+#define T1H_CYCLES  120  // ~750 ns HIGH for '1'
+#define T1L_CYCLES  80   // ~500 ns LOW  for '1'
+
+portMUX_TYPE timingMux = portMUX_INITIALIZER_UNLOCKED;
+
+static inline void waitCycles(uint32_t start, uint32_t cycles) {
+  while ((esp_cpu_get_ccount() - start) < cycles) {}
+}
+
+void IRAM_ATTR sendByte(uint8_t b) {
+  for (int bit = 7; bit >= 0; bit--) {
+    uint32_t start = esp_cpu_get_ccount();
+    REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_PIN));  // HIGH
+    if (b & (1 << bit)) {
+      waitCycles(start, T1H_CYCLES);
+      REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_PIN));  // LOW
+      waitCycles(start, T1H_CYCLES + T1L_CYCLES);
+    } else {
+      waitCycles(start, T0H_CYCLES);
+      REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_PIN));  // LOW
+      waitCycles(start, T0H_CYCLES + T0L_CYCLES);
+    }
+  }
+}
+
+void setBrightness(uint8_t level) {
+  portENTER_CRITICAL(&timingMux);
+  for (int i = 0; i < NUM_LEDS; i++) {
+    sendByte(level);  // G
+    sendByte(level);  // R
+    sendByte(level);  // B
+  }
+  portEXIT_CRITICAL(&timingMux);
+  delayMicroseconds(100);  // Latch frame
+}
+
+void setup() {
+  pinMode(ONBOARD_LED, OUTPUT);
+  digitalWrite(ONBOARD_LED, LOW);   // SuperMini blue LED ON
+
+  pinMode(LED_PIN, OUTPUT);         // Reclaim GPIO 21 from UART0 TX
+  digitalWrite(LED_PIN, LOW);
+  delay(50);
+
+  setBrightness(brightness);
+}
+
+void loop() {
+  // Optional: call setBrightness(newLevel) anytime to dim up or down
+  delay(1000);
+}
